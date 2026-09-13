@@ -1,0 +1,39 @@
+[package]
+name = "cksk"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.89"
+license = "FSL-1.1-ALv2"
+description = "Server-monitor boards for a clck kiosk display: polls status sources, renders big-type status screens, streams frames to the display server"
+homepage = "https://github.com/corbet-labs/cksk"
+
+# The board model+render are a [lib] so a future web build can reuse them without pulling
+# in any display-server code at all.
+[lib]
+name = "cksk"
+path = "src/lib.rs"
+
+[[bin]]
+name = "cksk"
+path = "src/bin/cksk.rs"
+
+[dependencies]
+# NO display-server dependency. cksk is a pure socket CLIENT of the clck kiosk display
+# protocol (nixlock implements the server side today) -- it speaks the wire protocol by
+# hand (src/bin/cksk.rs) and links no server code, no Wayland, and no PAM.
+
+# CPU rendering: shapes (tiny-skia) + glyph rasterization (fontdue).
+# Pure-Rust stack: one Pixmap feeds both --dump PNG and the streamed kiosk frames.
+tiny-skia = "0.11"
+fontdue = "0.9"
+
+# Statuses API client + its JSON shape.
+ureq = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Header clock/date formatting.
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+
+[profile.release]
+opt-level = 2
