@@ -10,20 +10,20 @@ use crate::chrome::{
 };
 use crate::model::Endpoint;
 
-/// Double-size metrics: body type is 2x the original single-screen layout.
-const ROW_H: f32 = 88.0;
+/// Room-readable but dense metrics: 12 rows per column at 1080p.
+/// Card math: head + 12*row + pad = 56 + 840 + 16 = 912 of 938 available.
+const ROW_H: f32 = 70.0;
 const GROUP_HEAD_H: f32 = 56.0;
 const CARD_PAD: f32 = 16.0;
 const GROUP_GAP: f32 = 20.0;
 const COL_GAP: f32 = 24.0;
-const NAME_SIZE: f32 = 30.0;
-const LAT_SIZE: f32 = 26.0;
-const TITLE_SIZE: f32 = 26.0;
-const COUNT_SIZE: f32 = 26.0;
+const NAME_SIZE: f32 = 26.0;
+const LAT_SIZE: f32 = 22.0;
+const TITLE_SIZE: f32 = 22.0;
+const COUNT_SIZE: f32 = 22.0;
 
-/// Rows per column at 2x on a 1080p screen: a card is head + n*row + pad and must fit
-/// 1080 - HEADER_H - 16 - PAD = 938. Nine rows: 56 + 792 + 16 = 864. Ten would be 952.
-pub const ROWS_PER_COLUMN: usize = 9;
+/// Rows per column: 12 fit (912px), 13 would need 982px. See ROW_H math above.
+pub const ROWS_PER_COLUMN: usize = 12;
 
 /// Filter `eps` down to the `want` groups, in `want` order. Missing or empty groups
 /// vanish silently, so a board never renders an empty card.
@@ -138,7 +138,7 @@ pub fn render_groups(
                 Some(false) => RED,
                 None => chrome::AMBER,
             };
-            chrome::circle(pm, gx + 10.0, ry + 30.0, 9.0, dot);
+            chrome::circle(pm, gx + 10.0, ry + 24.0, 8.0, dot);
 
             let lat = match e.latency_ms() {
                 Some(ms) if ms >= 1000.0 => format!("{:.2} s", ms / 1000.0),
@@ -151,7 +151,7 @@ pub fn render_groups(
                 &fonts.mono,
                 &lat,
                 gx + inner_w,
-                ry + 40.0,
+                ry + 32.0,
                 LAT_SIZE,
                 MUTED,
             );
@@ -159,10 +159,10 @@ pub fn render_groups(
             let name_x = gx + 30.0;
             let name_max = inner_w - 30.0 - lat_w - 12.0;
             let name = chrome::truncate(&fonts.sans, &e.name, NAME_SIZE, name_max);
-            chrome::text(pm, &fonts.sans, &name, name_x, ry + 40.0, NAME_SIZE, TEXT);
+            chrome::text(pm, &fonts.sans, &name, name_x, ry + 32.0, NAME_SIZE, TEXT);
 
-            let strip_y = ry + 54.0;
-            let strip_h = 10.0;
+            let strip_y = ry + 44.0;
+            let strip_h = 8.0;
             let strip_w = inner_w - 30.0;
             let hist = e.history(48);
             if hist.is_empty() {

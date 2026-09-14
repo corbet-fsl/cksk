@@ -1,0 +1,12 @@
+[Unit]
+Description=cksk host feed -- privileged host facts for the kiosk system board
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Values travel via environment, never via CLI (no secrets on a cmdline, ever).
+Environment=CKSK_FEED_OUT=/var/lib/cksk/host.json
+ExecStart=/usr/local/bin/cksk-host-feed.sh
+# Read-only probes; a missing tool degrades fields to null, never fails the run.
+SuccessExitStatus=0

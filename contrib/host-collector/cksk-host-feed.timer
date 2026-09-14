@@ -1,0 +1,9 @@
+[Unit]
+Description=cksk host feed every 15s
+
+[Timer]
+OnActiveSec=15s
+OnUnitActiveSec=15s
+
+[Install]
+WantedBy=timers.target

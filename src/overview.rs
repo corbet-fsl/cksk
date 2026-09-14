@@ -20,7 +20,8 @@ pub const GROUP_ORDER: &[&str] = &[
 
 const VERDICT_SIZE: f32 = 100.0;
 const SUBLINE_SIZE: f32 = 30.0;
-const ROW_H: f32 = 78.0;
+// Tall rows fill the 1080p screen: verdict block ~158 + 8 rows fill to the bottom pad.
+const ROW_H: f32 = 92.0;
 const ROW_NAME_SIZE: f32 = 38.0;
 const ROW_COUNT_SIZE: f32 = 32.0;
 
@@ -30,6 +31,7 @@ pub fn render_overview(
     fonts: &Fonts,
     hdr: &Header,
     groups: &[(String, Vec<usize>)],
+    data_age_secs: Option<u64>,
 ) {
     let w = pm.width() as f32;
     let h = pm.height() as f32;
@@ -45,22 +47,38 @@ pub fn render_overview(
         chrome::text(
             pm,
             &fonts.sans,
-            "ALLES OK",
+            "ALL OK",
             pad,
             y + 78.0,
             VERDICT_SIZE,
             GREEN,
         );
-        let sub = format!(
-            "{}/{} Services oben   ·   {} idle",
+        let mut sub = format!(
+            "{}/{} services up   ·   {} idle",
             hdr.up, hdr.total, hdr.unknown
         );
-        chrome::text(pm, &fonts.sans, &sub, pad, y + 122.0, SUBLINE_SIZE, MUTED);
+        let mut sub_color = MUTED;
+        if let Some(age) = data_age_secs {
+            if age > 90 {
+                // Stale green is worse than no green: say so on the screen.
+                sub.push_str(&format!("   ·   data {age}s old"));
+                sub_color = chrome::AMBER;
+            }
+        }
+        chrome::text(
+            pm,
+            &fonts.sans,
+            &sub,
+            pad,
+            y + 122.0,
+            SUBLINE_SIZE,
+            sub_color,
+        );
     } else {
         let v = format!(
-            "{} STÖRUNG{}",
+            "{} OUTAGE{}",
             hdr.down,
-            if hdr.down == 1 { "" } else { "EN" }
+            if hdr.down == 1 { "" } else { "S" }
         );
         chrome::text(pm, &fonts.sans, &v, pad, y + 78.0, VERDICT_SIZE, RED);
         let downs: Vec<&str> = eps
@@ -89,7 +107,7 @@ pub fn render_overview(
             .filter(|&&ei| eps[ei].up() == Some(false))
             .count();
         let dot = if down > 0 { RED } else { GREEN };
-        chrome::circle(pm, pad + 12.0, y + 34.0, 10.0, dot);
+        chrome::circle(pm, pad + 12.0, y + 40.0, 10.0, dot);
 
         let title = gname.to_uppercase();
         chrome::text(
@@ -97,7 +115,7 @@ pub fn render_overview(
             &fonts.sans,
             &title,
             pad + 36.0,
-            y + 50.0,
+            y + 58.0,
             ROW_NAME_SIZE,
             TEXT,
         );
@@ -113,7 +131,7 @@ pub fn render_overview(
             &fonts.mono,
             &stat,
             w - pad,
-            y + 50.0,
+            y + 58.0,
             ROW_COUNT_SIZE,
             stat_c,
         );

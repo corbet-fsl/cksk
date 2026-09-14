@@ -48,6 +48,10 @@ const MAX_BACKOFF: Duration = Duration::from_secs(5);
 struct FileConfig {
     gatus_url: Option<String>,
     socket_path: Option<String>,
+    /// Optional host-collected rows (network interfaces, pool aggregates) for the
+    /// system board. Written by a privileged collector outside this process
+    /// (cksk itself stays unprivileged); absent file reads as pending rows.
+    host_feed: Option<String>,
 }
 
 fn config_base() -> Option<std::path::PathBuf> {
@@ -101,6 +105,7 @@ fn resolve_gatus_url(file: &FileConfig) -> String {
 struct Resolved {
     gatus_url: String,
     socket_path: PathBuf,
+    host_feed: Option<String>,
 }
 
 fn resolve_config() -> Resolved {
@@ -137,6 +142,7 @@ fn resolve_config() -> Resolved {
     Resolved {
         gatus_url,
         socket_path,
+        host_feed: file.host_feed,
     }
 }
 
@@ -157,7 +163,8 @@ fn main() {
     }
 
     if let Some(out) = arg("--dump") {
-        let gatus_url = resolve_gatus_url(&load_file_config());
+        let file = load_file_config();
+        let gatus_url = resolve_gatus_url(&file);
         let source = arg("--source").unwrap_or(gatus_url);
         let screen = arg("--screen").unwrap_or_else(|| "overview".to_string());
         if !BOARDS.iter().any(|b| b.id == screen) {
@@ -168,7 +175,10 @@ fn main() {
             );
             std::process::exit(2);
         }
-        let show = Show::new(source);
+        // --feed <path> lets a preview render host rows from a fixture without
+        // touching the live config file.
+        let feed = arg("--feed").or(file.host_feed);
+        let show = Show::with_feed(source, feed);
 
         let (w, h) = (1920u32, 1080u32);
         let pm = show
@@ -185,7 +195,7 @@ fn main() {
         resolved.gatus_url,
         resolved.socket_path.display()
     );
-    let show = Show::new(resolved.gatus_url);
+    let show = Show::with_feed(resolved.gatus_url, resolved.host_feed);
     run_client(&resolved.socket_path, &show);
 }
 
