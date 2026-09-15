@@ -12,6 +12,7 @@
 pub mod chrome;
 pub mod gatus;
 pub mod groups;
+pub mod layout;
 pub mod model;
 pub mod overview;
 pub mod show;

@@ -34,6 +34,39 @@ for hw in /sys/class/hwmon/hwmon*; do
     DISK_TEMP[$disk]=$(python3 -c "print(round($temp/1000, 1))")
 done
 
+# ---- disk groups: named aggregates of physical disks outside any pool ----
+# CKSK_DISKGROUPS: space-separated name:MODEL-glob pairs, e.g. '2.5":ST5000LM000*'.
+# Model match (not letter: sdX names shift across boots). Health is UNKNOWN by
+# design here (no smartctl lane yet -- see README); IO + hottest temp are real.
+declare -A GROUP_DEVS=()
+GROUP_NAMES=()
+if [ -n "${CKSK_DISKGROUPS:-}" ]; then
+    for spec in $CKSK_DISKGROUPS; do
+        name=${spec%%:*}; glob=${spec#*:}
+        [ -n "$name" ] && [ -n "$glob" ] && [ "$name" != "$spec" ] || continue
+        devs=""
+        for blk in /sys/block/sd* /sys/block/hd* /sys/block/nvme* /sys/block/vd*; do
+            [ -e "$blk" ] || continue
+            dev=$(basename "$blk")
+            model=$(tr -d ' ' < "$blk/device/model" 2>/dev/null || echo "")
+            # shellcheck disable=SC2053
+            if [[ $model == $glob ]]; then devs="$devs $dev"; fi
+        done
+        devs=$(echo "$devs" | xargs)
+        if [ -n "$devs" ]; then GROUP_NAMES+=("$name"); GROUP_DEVS[$name]="$devs"; fi
+    done
+fi
+# Snapshot counters now; deltas are read after the 1s network window below.
+disk_counters() {
+    awk -v dev="$1" '$3==dev {print $4, $6, $8, $10, $13}' /proc/diskstats
+}
+declare -A DISK_SNAP=()
+for name in ${GROUP_NAMES[@]+"${GROUP_NAMES[@]}"}; do
+    for dev in ${GROUP_DEVS[$name]}; do
+        DISK_SNAP[$name,$dev]=$(disk_counters "$dev")
+    done
+done
+
 # ---- network: two samples 1s apart -> bit/s rates + link speed ----
 ifaces=()
 # shellcheck disable=SC2206
@@ -41,20 +74,32 @@ pats=(${CKSK_IFACES:-bond* br* wt* eth* en*})
 for path in /sys/class/net/*; do
     if=$(basename "$path")
     case "$if" in lo|veth*|docker*|podman*|cni*|flannel*|tunl*|bonding_masters) continue ;; esac
-    [ "$(cat "$path/operstate" 2>/dev/null)" = up ] || continue
+    # Down links that match the globs are KEPT with state=down: a missing link
+    # must read as broken on the board, never as absent.
+    up=0
+    [ "$(cat "$path/operstate" 2>/dev/null)" = up ] && up=1
     for pat in "${pats[@]}"; do
         # shellcheck disable=SC2053
-        if [[ $if == $pat ]]; then ifaces+=("$if"); break; fi
+        if [[ $if == $pat ]]; then ifaces+=("$if:$up"); break; fi
     done
 done
 declare -A rx0 tx0
-for if in "${ifaces[@]}"; do
+for entry in ${ifaces[@]+"${ifaces[@]}"}; do
+    if=${entry%%:*}; up=${entry##*:}
+    [ "$up" = 1 ] || continue
     rx0[$if]=$(cat "/sys/class/net/$if/statistics/rx_bytes" 2>/dev/null || echo 0)
     tx0[$if]=$(cat "/sys/class/net/$if/statistics/tx_bytes" 2>/dev/null || echo 0)
 done
 sleep 1
 net_json=""
-for if in "${ifaces[@]}"; do
+for entry in ${ifaces[@]+"${ifaces[@]}"}; do
+    if=${entry%%:*}; up=${entry##*:}
+    if [ "$up" != 1 ]; then
+        [ -n "$net_json" ] && net_json+=","
+        net_json+=$(printf '{"iface":%s,"rx_bps":0,"tx_bps":0,"speed_bps":null,"state":"down"}' \
+            "$(jstr "$if")")
+        continue
+    fi
     rx1=$(cat "/sys/class/net/$if/statistics/rx_bytes" 2>/dev/null || echo 0)
     tx1=$(cat "/sys/class/net/$if/statistics/tx_bytes" 2>/dev/null || echo 0)
     rx_bps=$(( (rx1 - rx0[$if]) * 8 ))
@@ -66,7 +111,7 @@ for if in "${ifaces[@]}"; do
         speed_json=null
     fi
     [ -n "$net_json" ] && net_json+=","
-    net_json+=$(printf '{"iface":%s,"rx_bps":%s,"tx_bps":%s,"speed_bps":%s}' \
+    net_json+=$(printf '{"iface":%s,"rx_bps":%s,"tx_bps":%s,"speed_bps":%s,"state":"up"}' \
         "$(jstr "$if")" "$rx_bps" "$tx_bps" "$speed_json")
 done
 
@@ -107,9 +152,46 @@ if have zpool; then
             "$(jstr "$pool")" "$(jstr "${health:-UNKNOWN}")" "$used_pct" "$read_bps" "$write_bps" "$hottest")
     done
 fi
-# NOTE: util_pct stays null (needs zpool iostat capacity -v parsing per vdev;
-# r/w rates above already answer "is the pool busy"). SMART health beyond the
-# pool state string is a follow-up (smartctl lane on the hub).
+# NOTE: util_pct stays null for zfs pools (needs zpool iostat capacity -v parsing
+# per vdev; r/w rates above already answer "is the pool busy"). SMART health beyond
+# the pool state string is a follow-up (smartctl lane on the hub).
+
+# ---- disk-group lanes: deltas over the same 1s network window above ----
+for name in ${GROUP_NAMES[@]+"${GROUP_NAMES[@]}"}; do
+    r_sec=0; w_sec=0; ms=0; ndev=0
+    for dev in ${GROUP_DEVS[$name]}; do
+        before=${DISK_SNAP[$name,$dev]:-}
+        after=$(disk_counters "$dev")
+        [ -n "$before" ] && [ -n "$after" ] || continue
+        # fields: r_ops r_sec w_ops w_sec ms_io
+        # shellcheck disable=SC2086
+        read -r _ brs _ bws bms <<<"$before"
+        # shellcheck disable=SC2086
+        read -r _ ars _ aws ams <<<"$after"
+        # Counter reset (device replug) reads as negative: skip the disk this round.
+        [ "$ars" -ge "$brs" ] && [ "$aws" -ge "$bws" ] && [ "$ams" -ge "$bms" ] || continue
+        r_sec=$(( r_sec + ars - brs )); w_sec=$(( w_sec + aws - bws )); ms=$(( ms + ams - bms ))
+        ndev=$(( ndev + 1 ))
+    done
+    # Mean device busyness, not the sum: five half-busy disks read 50%, not 250%.
+    util=null
+    if [ "$ndev" -gt 0 ]; then
+        util=$(( ms / ndev / 10 ))
+        [ "$util" -gt 100 ] && util=100
+    fi
+    hottest=null
+    for dev in ${GROUP_DEVS[$name]}; do
+        t=${DISK_TEMP[$dev]:-}
+        [ -n "$t" ] || continue
+        if [ "$hottest" = null ] || python3 -c "exit(0 if $t > $hottest else 1)" 2>/dev/null; then
+            hottest=$t
+        fi
+    done
+    [ -n "$pools_json" ] && pools_json+=","
+    pools_json+=$(printf '{"name":%s,"health":"UNKNOWN","used_pct":null,"read_bps":%s,"write_bps":%s,"util_pct":%s,"temp_c":%s}' \
+        "$(jstr "$name")" "$(( r_sec * 512 * 8 ))" "$(( w_sec * 512 * 8 ))" \
+        "$util" "$hottest")
+done
 
 now=$(date +%s)
 mkdir -p "$(dirname "$OUT")"

@@ -187,19 +187,33 @@ pub const PAD: f32 = 30.0;
 
 /// Persistent header: `corbet status` + summary left, clock/date + rotation
 /// indicator right, accent divider below. Identical on every board.
+/// Laid out on the 12-column grid: title block spans cols 0-7, clock block 8-11.
 pub fn render_header(pm: &mut Pixmap, fonts: &Fonts, hdr: &Header) {
-    let w = pm.width() as f32;
-    let pad = PAD;
+    use crate::layout::{self, H2, M, MARGIN, S, TINY};
 
-    text(pm, &fonts.sans, "corbet", pad, 58.0, 40.0, TEXT);
-    let cw = text_width(&fonts.sans, "corbet", 40.0);
+    let w = pm.width() as f32;
+    let band = layout::Rect {
+        x: MARGIN,
+        y: 0.0,
+        w: w - 2.0 * MARGIN,
+        h: HEADER_H,
+    };
+    let left = band.col(0, 8);
+    let right = band.col(8, 4);
+
+    // Baselines anchored on rhythm upward from the divider: summary sits S above
+    // it, the title one M above the summary. Clock shares the title baseline, so
+    // bottoms are flush by construction, not by constant.
+    let title_base = HEADER_H - S - M;
+    text(pm, &fonts.sans, "corbet", left.x, title_base, H2.size, TEXT);
+    let cw = text_width(&fonts.sans, "corbet", H2.size);
     text(
         pm,
         &fonts.sans,
         "status",
-        pad + cw + 14.0,
-        58.0,
-        40.0,
+        left.x + cw + 14.0,
+        title_base,
+        H2.size,
         ACCENT,
     );
     // summary line
@@ -207,11 +221,34 @@ pub fn render_header(pm: &mut Pixmap, fonts: &Fonts, hdr: &Header) {
         "{} services   ·   {} up   ·   {} down   ·   {} idle",
         hdr.total, hdr.up, hdr.down, hdr.unknown
     );
-    text(pm, &fonts.sans, &summary, pad, 82.0, 16.0, MUTED);
-    // clock (right)
-    text_right(pm, &fonts.mono, hdr.clock, w - pad, 56.0, 42.0, TEXT);
+    text(
+        pm,
+        &fonts.sans,
+        &summary,
+        left.x,
+        title_base + M,
+        TINY.size,
+        MUTED,
+    );
+    text_right(
+        pm,
+        &fonts.mono,
+        hdr.clock,
+        right.x + right.w,
+        title_base,
+        H2.size,
+        TEXT,
+    );
     let dateline = format!("{}   ·   {}", hdr.date, hdr.indicator);
-    text_right(pm, &fonts.sans, &dateline, w - pad, 82.0, 16.0, MUTED);
+    text_right(
+        pm,
+        &fonts.sans,
+        &dateline,
+        right.x + right.w,
+        title_base + M,
+        TINY.size,
+        MUTED,
+    );
     // accent divider
-    fill_rect(pm, pad, HEADER_H, w - 2.0 * pad, 2.0, ACCENT);
+    fill_rect(pm, band.x, HEADER_H, band.w, 2.0, ACCENT);
 }

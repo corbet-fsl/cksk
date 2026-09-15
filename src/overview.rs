@@ -1,9 +1,12 @@
 //! Overview board: the whole estate at a glance in giant type.
 //! One big verdict, then one row per group. Detail lives on the group boards.
+//! Geometry comes from the shared grid (layout.rs): rows, type and dots match
+//! every other board by construction.
 
 use tiny_skia::Pixmap;
 
-use crate::chrome::{self, Fonts, Header, GREEN, HEADER_H, MUTED, PAD, RED, TEXT};
+use crate::chrome::{self, Fonts, Header, HEADER_H, PAD};
+use crate::layout::{self, D1, H2, MARGIN, T3};
 use crate::model::Endpoint;
 
 /// Canonical group order: most customer-visible first, housekeeping last.
@@ -18,12 +21,7 @@ pub const GROUP_ORDER: &[&str] = &[
     "watchdog",
 ];
 
-const VERDICT_SIZE: f32 = 100.0;
-const SUBLINE_SIZE: f32 = 30.0;
-// Tall rows fill the 1080p screen: verdict block ~158 + 8 rows fill to the bottom pad.
 const ROW_H: f32 = 92.0;
-const ROW_NAME_SIZE: f32 = 38.0;
-const ROW_COUNT_SIZE: f32 = 32.0;
 
 pub fn render_overview(
     pm: &mut Pixmap,
@@ -35,29 +33,26 @@ pub fn render_overview(
 ) {
     let w = pm.width() as f32;
     let h = pm.height() as f32;
-    let pad = PAD;
 
     chrome::fill_rect(pm, 0.0, 0.0, w, h, chrome::BG);
     chrome::render_header(pm, fonts, hdr);
 
+    let grid = layout::Rect {
+        x: MARGIN,
+        y: 0.0,
+        w: w - 2.0 * MARGIN,
+        h,
+    };
     let mut y = HEADER_H + 28.0;
 
     // ---- verdict ----
     if hdr.down == 0 {
-        chrome::text(
-            pm,
-            &fonts.sans,
-            "ALL OK",
-            pad,
-            y + 78.0,
-            VERDICT_SIZE,
-            GREEN,
-        );
+        layout::line(pm, &fonts.sans, "ALL OK", grid, y, D1, chrome::GREEN);
         let mut sub = format!(
             "{}/{} services up   ·   {} idle",
             hdr.up, hdr.total, hdr.unknown
         );
-        let mut sub_color = MUTED;
+        let mut sub_color = chrome::MUTED;
         if let Some(age) = data_age_secs {
             if age > 90 {
                 // Stale green is worse than no green: say so on the screen.
@@ -65,13 +60,13 @@ pub fn render_overview(
                 sub_color = chrome::AMBER;
             }
         }
-        chrome::text(
+        layout::line(
             pm,
             &fonts.sans,
             &sub,
-            pad,
-            y + 122.0,
-            SUBLINE_SIZE,
+            grid,
+            y + D1.lh + layout::XS,
+            T3,
             sub_color,
         );
     } else {
@@ -80,22 +75,28 @@ pub fn render_overview(
             hdr.down,
             if hdr.down == 1 { "" } else { "S" }
         );
-        chrome::text(pm, &fonts.sans, &v, pad, y + 78.0, VERDICT_SIZE, RED);
+        layout::line(pm, &fonts.sans, &v, grid, y, D1, chrome::RED);
         let downs: Vec<&str> = eps
             .iter()
             .filter(|e| e.up() == Some(false))
             .map(|e| e.name.as_str())
             .collect();
         let joined = downs.join(", ");
-        let max_w = w - 2.0 * pad;
-        let names = chrome::truncate(&fonts.sans, &joined, SUBLINE_SIZE, max_w);
-        chrome::text(pm, &fonts.sans, &names, pad, y + 122.0, SUBLINE_SIZE, RED);
+        layout::line(
+            pm,
+            &fonts.sans,
+            &joined,
+            grid,
+            y + D1.lh + layout::XS,
+            T3,
+            chrome::RED,
+        );
     }
-    y += 158.0;
+    y += D1.lh + T3.lh + 2.0 * layout::XS + layout::M;
 
     // ---- one row per group ----
     for (gname, idxs) in groups {
-        if y + ROW_H > h - pad {
+        if y + ROW_H > h - PAD {
             break;
         }
         let up = idxs
@@ -106,18 +107,35 @@ pub fn render_overview(
             .iter()
             .filter(|&&ei| eps[ei].up() == Some(false))
             .count();
-        let dot = if down > 0 { RED } else { GREEN };
-        chrome::circle(pm, pad + 12.0, y + 40.0, 10.0, dot);
-
-        let title = gname.to_uppercase();
-        chrome::text(
+        let dot = if down > 0 { chrome::RED } else { chrome::GREEN };
+        let row = grid.at_y(y, ROW_H);
+        // Name block: dot + title share one line box, dot on the measured cap-center.
+        let name_top = y + (ROW_H - H2.lh) / 2.0;
+        layout::dot(
+            pm,
+            PAD + 12.0,
+            name_top,
+            layout::Face {
+                font: &fonts.sans,
+                size: H2.size,
+                sample: 'H',
+            },
+            10.0,
+            dot,
+        );
+        layout::line(
             pm,
             &fonts.sans,
-            &title,
-            pad + 36.0,
-            y + 58.0,
-            ROW_NAME_SIZE,
-            TEXT,
+            &gname.to_uppercase(),
+            layout::Rect {
+                x: PAD + 36.0,
+                y: row.y,
+                w: row.w - 36.0,
+                h: row.h,
+            },
+            name_top,
+            H2,
+            chrome::TEXT,
         );
 
         let stat = if down > 0 {
@@ -125,21 +143,13 @@ pub fn render_overview(
         } else {
             format!("{up}/{0} OK", idxs.len())
         };
-        let stat_c = if down > 0 { RED } else { MUTED };
-        chrome::text_right(
-            pm,
-            &fonts.mono,
-            &stat,
-            w - pad,
-            y + 58.0,
-            ROW_COUNT_SIZE,
-            stat_c,
-        );
+        let stat_c = if down > 0 { chrome::RED } else { chrome::MUTED };
+        layout::line_right(pm, &fonts.mono, &stat, row, name_top, T3, stat_c);
         chrome::fill_rect(
             pm,
-            pad,
+            PAD,
             y + ROW_H - 2.0,
-            w - 2.0 * pad,
+            w - 2.0 * PAD,
             2.0,
             chrome::CARD_LINE,
         );

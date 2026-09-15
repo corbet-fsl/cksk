@@ -1,16 +1,14 @@
 //! System board: host resources in giant type, read locally without GPU work.
-//! Every source is a plain file read (`/proc`, `/sys`) plus one `df` call per poll for
-//! disk usage: no perf counters, nothing that wakes the GPU. `rocm-smi`/`amdgpu_top` are
-//! deliberately NOT used -- they can pull the card out of its low-power state.
+//! Every source is a plain file read (`/proc`, `/sys`): no subprocesses, no perf
+//! counters, nothing that wakes the GPU. `rocm-smi`/`amdgpu_top` are deliberately
+//! NOT used -- they can pull the card out of its low-power state. Facts the kiosk
+//! cannot see itself (host links, pool aggregates) arrive via the optional host
+//! feed file instead -- see `HostFeedFile`.
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use tiny_skia::Pixmap;
-
-use crate::chrome::{
-    self, Fonts, Header, ACCENT, CARD, FAINT, GREEN, HEADER_H, MUTED, PAD, RED, TEXT,
-};
+use crate::chrome::{self, Fonts, Header, HEADER_H};
 
 const FAST_INTERVAL: Duration = Duration::from_secs(1);
 const SLOW_EVERY_NTH_TICK: u64 = 5;
@@ -33,6 +31,14 @@ pub struct NetIf {
     pub tx_bps: f64,
     /// Link speed in bit/s, when known. Without it only absolute rates render.
     pub speed_bps: Option<f64>,
+    /// "up" or "down". Down links render dimmed with no rates: a missing link
+    /// must read as broken, never as absent.
+    #[serde(default = "net_up")]
+    pub state: String,
+}
+
+fn net_up() -> String {
+    "up".to_string()
 }
 
 /// One pool, aggregated by the host collector (cksk never maps disks itself).
@@ -480,24 +486,19 @@ pub fn format_uptime(s: u64) -> String {
     }
 }
 
-// ---------- render ----------
+// ---------- render (grid system) ----------
+//
+// Three columns (grid cols 0-3 / 4-7 / 8-11): compute, memory, temps.
+// Below: one full-span network row, one full-span pools row.
+// All positions derive from layout rhythm + type scale; nothing hand-placed.
 
-const TITLE_SIZE: f32 = 26.0;
-const SUB_SIZE: f32 = 26.0;
-const INPAD: f32 = 24.0;
+use crate::layout::{self, BODY, H1, H2, MARGIN, MICRO, SMALL, T3, XS};
 
-/// Shared render context: seven-argument card functions collapse to five.
-struct Cx<'a> {
-    pm: &'a mut Pixmap,
-    fonts: &'a Fonts,
-    sys: &'a SysSnapshot,
+fn card_title(pm: &mut tiny_skia::Pixmap, fonts: &Fonts, r: layout::Rect, title: &str) {
+    layout::line(pm, &fonts.sans, title, r, r.y + XS, BODY, chrome::ACCENT);
 }
 
-fn card_title(pm: &mut Pixmap, fonts: &Fonts, x: f32, y: f32, title: &str) {
-    chrome::text(pm, &fonts.sans, title, x, y + 34.0, TITLE_SIZE, ACCENT);
-}
-
-fn hist_strip(pm: &mut Pixmap, x: f32, y: f32, w: f32, h: f32, hist: &[f64]) {
+fn hist_strip(pm: &mut tiny_skia::Pixmap, x: f32, y: f32, w: f32, h: f32, hist: &[f64]) {
     if hist.is_empty() {
         chrome::fill_rect(pm, x, y, w, h, chrome::HIST_NONE);
         return;
@@ -512,11 +513,12 @@ fn hist_strip(pm: &mut Pixmap, x: f32, y: f32, w: f32, h: f32, hist: &[f64]) {
             (seg - 1.0).max(1.0),
             h,
             v / 100.0,
-            GREEN,
+            chrome::GREEN,
         );
     }
 }
-fn vbar(pm: &mut Pixmap, x: f32, y: f32, w: f32, h: f32, frac: f64, fill: chrome::Rgb) {
+
+fn vbar(pm: &mut tiny_skia::Pixmap, x: f32, y: f32, w: f32, h: f32, frac: f64, fill: chrome::Rgb) {
     let f = frac.clamp(0.0, 1.0) as f32;
     chrome::fill_rect(pm, x, y, w, h, chrome::HIST_NONE);
     if f > 0.0 {
@@ -524,286 +526,7 @@ fn vbar(pm: &mut Pixmap, x: f32, y: f32, w: f32, h: f32, frac: f64, fill: chrome
     }
 }
 
-pub fn render_system(pm: &mut Pixmap, sys: &SysSnapshot, fonts: &Fonts, hdr: &Header) {
-    let w = pm.width() as f32;
-    let h = pm.height() as f32;
-    let pad = PAD;
-
-    chrome::fill_rect(pm, 0.0, 0.0, w, h, chrome::BG);
-    chrome::render_header(pm, fonts, hdr);
-
-    // Vertical budget (1080p): header 112 + main 520 + net 140 + pools 170 + gaps.
-    let gap = 20.0;
-    let top = HEADER_H + 16.0;
-    let main_h = 520.0;
-    let net_y = top + main_h + gap;
-    let net_h = 140.0;
-    let pool_y = net_y + net_h + gap;
-    let pool_h = h - pool_y - pad;
-
-    let col_gap = 24.0;
-    let col_w = (w - 2.0 * pad - 2.0 * col_gap) / 3.0;
-    let colx = [pad, pad + col_w + col_gap, pad + 2.0 * (col_w + col_gap)];
-    let mut cx = Cx { pm, fonts, sys };
-
-    // ---- column 1: COMPUTE (CPU over GPU) ----
-    {
-        let cpu_h = 320.0;
-        let gpu_h = main_h - cpu_h - gap;
-        cpu_card(&mut cx, colx[0], top, col_w, cpu_h);
-        gpu_card(&mut cx, colx[0], top + cpu_h + gap, col_w, gpu_h);
-    }
-
-    // ---- column 2: MEMORY (RAM over VRAM) ----
-    {
-        let ram_h = 320.0;
-        let vram_h = main_h - ram_h - gap;
-        ram_card(&mut cx, colx[1], top, col_w, ram_h);
-        vram_card(&mut cx, colx[1], top + ram_h + gap, col_w, vram_h);
-    }
-
-    // ---- column 3: TEMPS ----
-    temps_card(&mut cx, colx[2], top, col_w, main_h);
-
-    // ---- bottom row: NETWORK, one line of interfaces ----
-    net_row(&mut cx, pad, net_y, w - 2.0 * pad, net_h);
-
-    // ---- bottom row: POOLS, aggregates only, never datasets ----
-    pools_row(&mut cx, pad, pool_y, w - 2.0 * pad, pool_h);
-}
-
-fn cpu_card(cx: &mut Cx, x: f32, y: f32, w: f32, h: f32) {
-    let Cx { pm, fonts, sys } = cx;
-    chrome::rounded_rect(pm, x, y, w, h, 16.0, CARD);
-    card_title(pm, fonts, x + INPAD, y + 8.0, "CPU");
-    let big = match sys.cpu_pct {
-        Some(p) => format!("{p:.0}%"),
-        None => "—".to_string(),
-    };
-    chrome::text(pm, &fonts.mono, &big, x + INPAD, y + 108.0, 64.0, TEXT);
-    let load = format!("load {:.2} {:.2} {:.2}", sys.load1, sys.load5, sys.load15);
-    chrome::text(
-        pm,
-        &fonts.mono,
-        &load,
-        x + INPAD,
-        y + 144.0,
-        SUB_SIZE,
-        MUTED,
-    );
-    hist_strip(
-        pm,
-        x + INPAD,
-        y + 160.0,
-        w - 2.0 * INPAD,
-        14.0,
-        &sys.cpu_hist,
-    );
-    if !sys.cpu_each.is_empty() {
-        let n = sys.cpu_each.len() as f32;
-        let bw = (w - 2.0 * INPAD) / n;
-        let bh = 56.0;
-        let by = y + h - INPAD - bh;
-        for (i, pct) in sys.cpu_each.iter().enumerate() {
-            vbar(
-                pm,
-                x + INPAD + i as f32 * bw,
-                by,
-                (bw - 2.0).max(1.0),
-                bh,
-                pct / 100.0,
-                GREEN,
-            );
-        }
-    }
-}
-
-fn gpu_card(cx: &mut Cx, x: f32, y: f32, w: f32, h: f32) {
-    let Cx { pm, fonts, sys } = cx;
-    chrome::rounded_rect(pm, x, y, w, h, 16.0, CARD);
-    card_title(pm, fonts, x + INPAD, y + 8.0, "GPU");
-    match &sys.gpu {
-        Some(g) => {
-            let big = format!("GFX {}%", g.busy_pct);
-            chrome::text(pm, &fonts.mono, &big, x + INPAD, y + 96.0, 56.0, TEXT);
-            let mut sub = format!("VRAM {:.1} GiB", g.vram_used_gib);
-            if let Some(p) = g.power_w {
-                sub.push_str(&format!("   ·   {p:.0} W"));
-            }
-            chrome::text(pm, &fonts.mono, &sub, x + INPAD, y + 132.0, SUB_SIZE, MUTED);
-        }
-        None => {
-            chrome::text(
-                pm,
-                &fonts.sans,
-                "no GPU visible",
-                x + INPAD,
-                y + 96.0,
-                SUB_SIZE,
-                FAINT,
-            );
-        }
-    }
-    let _ = h;
-}
-
-fn ram_card(cx: &mut Cx, x: f32, y: f32, w: f32, h: f32) {
-    let Cx { pm, fonts, sys } = cx;
-    chrome::rounded_rect(pm, x, y, w, h, 16.0, CARD);
-    card_title(pm, fonts, x + INPAD, y + 8.0, "RAM");
-    let big = format!("{:.0} / {:.0} GiB", sys.mem_used_gib, sys.mem_total_gib);
-    chrome::text(pm, &fonts.mono, &big, x + INPAD, y + 96.0, 60.0, TEXT);
-    let frac = if sys.mem_total_gib > 0.0 {
-        sys.mem_used_gib / sys.mem_total_gib
-    } else {
-        0.0
-    };
-    chrome::bar(pm, x + INPAD, y + 118.0, w - 2.0 * INPAD, 16.0, frac, GREEN);
-    // Swap mirrors RAM one-to-one: own title, own headline, own bar -- never a footnote.
-    card_title(pm, fonts, x + INPAD, y + 156.0, "SWAP");
-    let swap_big = if sys.swap_total_gib > 0.0 {
-        format!("{:.0} / {:.0} GiB", sys.swap_used_gib, sys.swap_total_gib)
-    } else {
-        "no swap".to_string()
-    };
-    let swap_frac = if sys.swap_total_gib > 0.0 {
-        sys.swap_used_gib / sys.swap_total_gib
-    } else {
-        0.0
-    };
-    let swap_color = if swap_frac > 0.9 {
-        RED
-    } else if swap_frac > 0.7 {
-        chrome::AMBER
-    } else {
-        GREEN
-    };
-    chrome::text(pm, &fonts.mono, &swap_big, x + INPAD, y + 220.0, 60.0, TEXT);
-    chrome::bar(
-        pm,
-        x + INPAD,
-        y + 242.0,
-        w - 2.0 * INPAD,
-        16.0,
-        swap_frac,
-        swap_color,
-    );
-    let _ = h;
-}
-
-fn vram_card(cx: &mut Cx, x: f32, y: f32, w: f32, h: f32) {
-    let Cx { pm, fonts, sys } = cx;
-    chrome::rounded_rect(pm, x, y, w, h, 16.0, CARD);
-    card_title(pm, fonts, x + INPAD, y + 8.0, "VRAM");
-    match &sys.gpu {
-        Some(g) => {
-            let big = format!("{:.1} / {:.0} GiB", g.vram_used_gib, g.vram_total_gib);
-            chrome::text(pm, &fonts.mono, &big, x + INPAD, y + 108.0, 64.0, TEXT);
-            let frac = if g.vram_total_gib > 0.0 {
-                g.vram_used_gib / g.vram_total_gib
-            } else {
-                0.0
-            };
-            chrome::bar(pm, x + INPAD, y + 132.0, w - 2.0 * INPAD, 16.0, frac, GREEN);
-        }
-        None => {
-            chrome::text(
-                pm,
-                &fonts.sans,
-                "no GPU visible",
-                x + INPAD,
-                y + 108.0,
-                SUB_SIZE,
-                FAINT,
-            );
-        }
-    }
-    let _ = h;
-}
-
-fn temp_row(
-    pm: &mut Pixmap,
-    fonts: &Fonts,
-    x: f32,
-    y: f32,
-    w: f32,
-    label: &str,
-    value: Option<String>,
-) {
-    chrome::text(pm, &fonts.sans, label, x, y, 30.0, MUTED);
-    match value {
-        Some(v) => chrome::text_right(pm, &fonts.mono, &v, x + w, y, 32.0, TEXT),
-        None => chrome::text_right(pm, &fonts.mono, "—", x, y, 32.0, FAINT),
-    }
-}
-
-fn fmt_temp(c: Option<f32>) -> Option<String> {
-    c.map(|t| format!("{t:.0}°"))
-}
-
-fn temps_card(cx: &mut Cx, x: f32, y: f32, w: f32, h: f32) {
-    let Cx { pm, fonts, sys } = cx;
-    chrome::rounded_rect(pm, x, y, w, h, 16.0, CARD);
-    card_title(pm, fonts, x + INPAD, y + 8.0, "TEMPS");
-    let inner = w - 2.0 * INPAD;
-    let mut ry = y + 78.0;
-    let step = 52.0;
-    temp_row(
-        pm,
-        fonts,
-        x + INPAD,
-        ry,
-        inner,
-        "CPU",
-        fmt_temp(sys.cpu_temp_c),
-    );
-    ry += step;
-    for (i, t) in sys.cpu_ccd.iter().enumerate() {
-        temp_row(
-            pm,
-            fonts,
-            x + INPAD,
-            ry,
-            inner,
-            &format!("CPU CCD{}", i + 1),
-            fmt_temp(Some(*t)),
-        );
-        ry += step;
-    }
-    if let Some(g) = &sys.gpu {
-        for (label, t) in [
-            ("GPU edge", g.edge_c),
-            ("GPU junction", g.junction_c),
-            ("GPU mem", g.mem_c),
-        ] {
-            temp_row(pm, fonts, x + INPAD, ry, inner, label, fmt_temp(t));
-            ry += step;
-        }
-    }
-    for p in sys.pools.iter().take(2) {
-        temp_row(
-            pm,
-            fonts,
-            x + INPAD,
-            ry,
-            inner,
-            &format!("pool {}", p.name),
-            fmt_temp(p.temp_c),
-        );
-        ry += step;
-    }
-    chrome::text(
-        pm,
-        &fonts.mono,
-        &format!("up {}", format_uptime(sys.uptime_s)),
-        x + INPAD,
-        y + h - INPAD,
-        SUB_SIZE,
-        MUTED,
-    );
-}
-
-/// Human bit-rate: 340 kb/s, 12 Mb/s, 1.2 Gb/s. Below 1 kb/s reads as idle dots.
+/// Human bit-rate: 340 kb/s, 12 Mb/s, 1.2 Gb/s. Below 1 kb/s reads as idle.
 fn human_bps(bps: f64) -> String {
     if bps < 1_000.0 {
         "—".to_string()
@@ -816,101 +539,474 @@ fn human_bps(bps: f64) -> String {
     }
 }
 
-fn net_row(cx: &mut Cx, x: f32, y: f32, w: f32, h: f32) {
+fn fmt_temp(c: Option<f32>) -> Option<String> {
+    c.map(|t| format!("{t:.0}°"))
+}
+
+/// Shared render context: seven-argument card functions collapse to five.
+struct Cx<'a> {
+    pm: &'a mut tiny_skia::Pixmap,
+    fonts: &'a Fonts,
+    sys: &'a SysSnapshot,
+}
+
+pub fn render_system(pm: &mut tiny_skia::Pixmap, sys: &SysSnapshot, fonts: &Fonts, hdr: &Header) {
+    let w = pm.width() as f32;
+    let h = pm.height() as f32;
+
+    chrome::fill_rect(pm, 0.0, 0.0, w, h, chrome::BG);
+    chrome::render_header(pm, fonts, hdr);
+
+    // Vertical budget (1080p): header 112 + main 520 + net 140 + pools 170 + gaps.
+    let grid = layout::Rect {
+        x: MARGIN,
+        y: HEADER_H + layout::S,
+        w: w - 2.0 * MARGIN,
+        h: h - HEADER_H - layout::S - MARGIN,
+    };
+    let (main, rest) = grid.take_top(520.0, layout::M);
+    let (net, pools) = rest.take_top(140.0, layout::M);
+
+    let cols = main.columns(3);
+    let mut cx = Cx { pm, fonts, sys };
+    cpu_gpu_column(&mut cx, cols[0]);
+    mem_column(&mut cx, cols[1]);
+    temps_card(&mut cx, cols[2]);
+    net_row(&mut cx, net);
+    pools_row(&mut cx, pools);
+}
+
+fn cpu_gpu_column(cx: &mut Cx, col: layout::Rect) {
+    let (cpu, gpu) = col.take_top(320.0, layout::M);
+    cpu_card(cx, cpu);
+    gpu_card(cx, gpu);
+}
+
+fn mem_column(cx: &mut Cx, col: layout::Rect) {
+    let (ram, vram) = col.take_top(320.0, layout::M);
+    ram_card(cx, ram);
+    vram_card(cx, vram);
+}
+
+fn cpu_card(cx: &mut Cx, card: layout::Rect) {
     let Cx { pm, fonts, sys } = cx;
-    chrome::rounded_rect(pm, x, y, w, h, 16.0, CARD);
-    card_title(pm, fonts, x + INPAD, y + 4.0, "NET");
+    chrome::rounded_rect(pm, card.x, card.y, card.w, card.h, 16.0, chrome::CARD);
+    let inner = card.inset(layout::M);
+    card_title(pm, fonts, inner, "CPU");
+    let big = match sys.cpu_pct {
+        Some(p) => format!("{p:.0}%"),
+        None => "—".to_string(),
+    };
+    let head_top = inner.y + BODY.lh + layout::XS;
+    layout::line(pm, &fonts.mono, &big, inner, head_top, H1, chrome::TEXT);
+    let load = format!("load {:.2} {:.2} {:.2}", sys.load1, sys.load5, sys.load15);
+    layout::line(
+        pm,
+        &fonts.mono,
+        &load,
+        inner,
+        head_top + H1.lh + layout::XS,
+        SMALL,
+        chrome::MUTED,
+    );
+    hist_strip(
+        pm,
+        inner.x,
+        head_top + H1.lh + SMALL.lh + 2.0 * layout::XS,
+        inner.w,
+        14.0,
+        &sys.cpu_hist,
+    );
+    if !sys.cpu_each.is_empty() {
+        let n = sys.cpu_each.len() as f32;
+        let bw = inner.w / n;
+        let bh = 56.0;
+        let by = card.y + card.h - layout::M - bh;
+        for (i, pct) in sys.cpu_each.iter().enumerate() {
+            vbar(
+                pm,
+                inner.x + i as f32 * bw,
+                by,
+                (bw - 2.0).max(1.0),
+                bh,
+                pct / 100.0,
+                chrome::GREEN,
+            );
+        }
+    }
+}
+
+fn gpu_card(cx: &mut Cx, card: layout::Rect) {
+    let Cx { pm, fonts, sys } = cx;
+    chrome::rounded_rect(pm, card.x, card.y, card.w, card.h, 16.0, chrome::CARD);
+    let inner = card.inset(layout::M);
+    card_title(pm, fonts, inner, "GPU");
+    match &sys.gpu {
+        Some(g) => {
+            let big = format!("GFX {}%", g.busy_pct);
+            let head_top = inner.y + BODY.lh + layout::XS;
+            layout::line(pm, &fonts.mono, &big, inner, head_top, H1, chrome::TEXT);
+            let mut sub = format!("VRAM {:.1} GiB", g.vram_used_gib);
+            if let Some(p) = g.power_w {
+                sub.push_str(&format!("   ·   {p:.0} W"));
+            }
+            layout::line(
+                pm,
+                &fonts.mono,
+                &sub,
+                inner,
+                head_top + H1.lh + layout::XS,
+                SMALL,
+                chrome::MUTED,
+            );
+        }
+        None => {
+            layout::line(
+                pm,
+                &fonts.sans,
+                "no GPU visible",
+                inner,
+                inner.y + BODY.lh + layout::XS,
+                SMALL,
+                chrome::FAINT,
+            );
+        }
+    }
+}
+
+fn ram_card(cx: &mut Cx, card: layout::Rect) {
+    let Cx { pm, fonts, sys } = cx;
+    chrome::rounded_rect(pm, card.x, card.y, card.w, card.h, 16.0, chrome::CARD);
+    let inner = card.inset(layout::M);
+    card_title(pm, fonts, inner, "RAM");
+    let big = format!("{:.0} / {:.0} GiB", sys.mem_used_gib, sys.mem_total_gib);
+    let head_top = inner.y + BODY.lh + layout::XS;
+    layout::line(pm, &fonts.mono, &big, inner, head_top, H1, chrome::TEXT);
+    let frac = if sys.mem_total_gib > 0.0 {
+        sys.mem_used_gib / sys.mem_total_gib
+    } else {
+        0.0
+    };
+    chrome::bar(
+        pm,
+        inner.x,
+        head_top + H1.lh + layout::XS,
+        inner.w,
+        16.0,
+        frac,
+        chrome::GREEN,
+    );
+    // Swap mirrors RAM one-to-one: own title, own headline, own bar.
+    let stop = head_top + H1.lh + 16.0 + 2.0 * layout::XS;
+    card_title(pm, fonts, layout::Rect { y: stop, ..inner }, "SWAP");
+    let swap_big = if sys.swap_total_gib > 0.0 {
+        format!("{:.0} / {:.0} GiB", sys.swap_used_gib, sys.swap_total_gib)
+    } else {
+        "no swap".to_string()
+    };
+    let swap_frac = if sys.swap_total_gib > 0.0 {
+        sys.swap_used_gib / sys.swap_total_gib
+    } else {
+        0.0
+    };
+    let swap_color = if swap_frac > 0.9 {
+        chrome::RED
+    } else if swap_frac > 0.7 {
+        chrome::AMBER
+    } else {
+        chrome::GREEN
+    };
+    let swap_top = stop + BODY.lh + layout::XS;
+    layout::line(
+        pm,
+        &fonts.mono,
+        &swap_big,
+        inner,
+        swap_top,
+        H1,
+        chrome::TEXT,
+    );
+    chrome::bar(
+        pm,
+        inner.x,
+        swap_top + H1.lh + layout::XS,
+        inner.w,
+        16.0,
+        swap_frac,
+        swap_color,
+    );
+}
+
+fn vram_card(cx: &mut Cx, card: layout::Rect) {
+    let Cx { pm, fonts, sys } = cx;
+    chrome::rounded_rect(pm, card.x, card.y, card.w, card.h, 16.0, chrome::CARD);
+    let inner = card.inset(layout::M);
+    card_title(pm, fonts, inner, "VRAM");
+    match &sys.gpu {
+        Some(g) => {
+            let big = format!("{:.1} / {:.0} GiB", g.vram_used_gib, g.vram_total_gib);
+            let head_top = inner.y + BODY.lh + layout::XS;
+            layout::line(pm, &fonts.mono, &big, inner, head_top, H1, chrome::TEXT);
+            let frac = if g.vram_total_gib > 0.0 {
+                g.vram_used_gib / g.vram_total_gib
+            } else {
+                0.0
+            };
+            chrome::bar(
+                pm,
+                inner.x,
+                head_top + H1.lh + layout::XS,
+                inner.w,
+                16.0,
+                frac,
+                chrome::GREEN,
+            );
+        }
+        None => {
+            layout::line(
+                pm,
+                &fonts.sans,
+                "no GPU visible",
+                inner,
+                inner.y + BODY.lh + layout::XS,
+                SMALL,
+                chrome::FAINT,
+            );
+        }
+    }
+}
+
+fn temps_card(cx: &mut Cx, card: layout::Rect) {
+    let Cx { pm, fonts, sys } = cx;
+    chrome::rounded_rect(pm, card.x, card.y, card.w, card.h, 16.0, chrome::CARD);
+    let inner = card.inset(layout::M);
+    card_title(pm, fonts, inner, "TEMPS");
+    let mut top = inner.y + BODY.lh + layout::XS;
+    let step = T3.lh + layout::XS;
+    let mut row = |label: &str, value: Option<String>| {
+        layout::line(pm, &fonts.sans, label, inner, top, T3, chrome::MUTED);
+        layout::line_right(
+            pm,
+            &fonts.mono,
+            &value.unwrap_or_else(|| "—".to_string()),
+            inner,
+            top,
+            T3,
+            chrome::TEXT,
+        );
+        top += step;
+    };
+    row("CPU", fmt_temp(sys.cpu_temp_c));
+    for (i, t) in sys.cpu_ccd.iter().enumerate() {
+        row(&format!("CPU CCD{}", i + 1), fmt_temp(Some(*t)));
+    }
+    if let Some(g) = &sys.gpu {
+        row("GPU edge", fmt_temp(g.edge_c));
+        row("GPU junction", fmt_temp(g.junction_c));
+        row("GPU mem", fmt_temp(g.mem_c));
+    }
+    // Pool temps live in-lane on the pools row (used % · temp); duplicating them
+    // here would overflow the card once a third lane exists.
+    layout::line(
+        pm,
+        &fonts.mono,
+        &format!("up {}", format_uptime(sys.uptime_s)),
+        inner,
+        card.y + card.h - layout::M - SMALL.lh,
+        SMALL,
+        chrome::MUTED,
+    );
+}
+
+fn net_row(cx: &mut Cx, row: layout::Rect) {
+    let Cx { pm, fonts, sys } = cx;
+    chrome::rounded_rect(pm, row.x, row.y, row.w, row.h, 16.0, chrome::CARD);
+    let inner = row.inset(layout::M);
+    // Side label gutter: title vertically centered, feed age beneath it.
+    // Blocks take the remaining width at full inner height.
+    let gutter = 140.0;
+    let mid = inner.y + inner.h / 2.0;
+    layout::line(
+        pm,
+        &fonts.sans,
+        "NET",
+        inner,
+        layout::mid_baseline(&fonts.sans, mid - MICRO.lh, BODY.size, 'H'),
+        BODY,
+        chrome::ACCENT,
+    );
+    if let Some(age) = sys.feed_age_secs {
+        // Gutter-owned, never over block content (br0's pct lives top-right).
+        layout::line(
+            pm,
+            &fonts.mono,
+            &format!("feed {age}s"),
+            inner,
+            mid + layout::XS,
+            MICRO,
+            chrome::FAINT,
+        );
+    }
+    let blocks = layout::Rect {
+        x: inner.x + gutter,
+        w: inner.w - gutter,
+        ..inner
+    }
+    .columns(sys.net.len().max(1));
     if sys.net.is_empty() {
-        pending_strip(pm, fonts, x + INPAD, y + 52.0, w - 2.0 * INPAD, "network");
+        layout::line(
+            pm,
+            &fonts.sans,
+            "network: waiting for host feed",
+            blocks[0],
+            layout::mid_baseline(&fonts.sans, mid, BODY.size, 'H'),
+            BODY,
+            chrome::FAINT,
+        );
         return;
     }
-    let n = sys.net.len().max(1) as f32;
-    let bw = (w - 2.0 * INPAD) / n;
-    for (i, nic) in sys.net.iter().enumerate() {
-        let bx = x + INPAD + i as f32 * bw;
-        chrome::text(pm, &fonts.sans, &nic.iface, bx, y + 74.0, 24.0, ACCENT);
+    for (nic, b) in sys.net.iter().zip(blocks.iter()) {
+        if nic.state != "up" {
+            // Down is data: dimmed name plus the word, same geometry as a live block.
+            layout::line(pm, &fonts.sans, &nic.iface, *b, b.y, BODY, chrome::FAINT);
+            layout::line(
+                pm,
+                &fonts.mono,
+                "down",
+                *b,
+                b.y + BODY.lh + layout::XS,
+                SMALL,
+                chrome::RED,
+            );
+            continue;
+        }
+        layout::line(pm, &fonts.sans, &nic.iface, *b, b.y, BODY, chrome::ACCENT);
         let rates = format!("↓ {}   ↑ {}", human_bps(nic.rx_bps), human_bps(nic.tx_bps));
-        chrome::text(pm, &fonts.mono, &rates, bx, y + 102.0, 22.0, MUTED);
+        layout::line(
+            pm,
+            &fonts.mono,
+            &rates,
+            *b,
+            b.y + BODY.lh + layout::XS,
+            SMALL,
+            chrome::MUTED,
+        );
         let peak = nic.rx_bps.max(nic.tx_bps);
         if let Some(speed) = nic.speed_bps {
             if speed > 0.0 {
                 chrome::bar(
                     pm,
-                    bx,
-                    y + h - INPAD - 10.0,
-                    bw - 16.0,
+                    b.x,
+                    b.y + b.h - 10.0,
+                    b.w - layout::S,
                     10.0,
                     peak / speed,
-                    GREEN,
+                    chrome::GREEN,
                 );
-                let pct = format!("{:.1}%", peak / speed * 100.0);
-                chrome::text_right(pm, &fonts.mono, &pct, bx + bw - 16.0, y + 56.0, 22.0, MUTED);
+                layout::line_right(
+                    pm,
+                    &fonts.mono,
+                    &format!("{:.1}%", peak / speed * 100.0),
+                    *b,
+                    b.y,
+                    SMALL,
+                    chrome::MUTED,
+                );
             }
         }
     }
-    if let Some(age) = sys.feed_age_secs {
-        chrome::text_right(
-            pm,
-            &fonts.mono,
-            &format!("feed {age}s"),
-            x + w - INPAD,
-            y + 30.0,
-            20.0,
-            FAINT,
-        );
-    }
 }
 
-fn pending_strip(pm: &mut Pixmap, fonts: &Fonts, x: f32, y: f32, w: f32, what: &str) {
-    chrome::text(
+fn pools_row(cx: &mut Cx, row: layout::Rect) {
+    let Cx { pm, fonts, sys } = cx;
+    chrome::rounded_rect(pm, row.x, row.y, row.w, row.h, 16.0, chrome::CARD);
+    let inner = row.inset(layout::M);
+    // Side label gutter like the network row; halves take the rest at full height.
+    let gutter = 140.0;
+    let mid = inner.y + inner.h / 2.0;
+    layout::line(
         pm,
         &fonts.sans,
-        &format!("{what}: waiting for host feed"),
-        x,
-        y,
-        SUB_SIZE,
-        FAINT,
+        "POOLS",
+        inner,
+        layout::mid_baseline(&fonts.sans, mid, BODY.size, 'H'),
+        BODY,
+        chrome::ACCENT,
     );
-    let _ = w;
-}
-
-fn pools_row(cx: &mut Cx, x: f32, y: f32, w: f32, h: f32) {
-    let Cx { pm, fonts, sys } = cx;
-    chrome::rounded_rect(pm, x, y, w, h, 16.0, CARD);
-    card_title(pm, fonts, x + INPAD, y + 4.0, "POOLS");
     if sys.pools.is_empty() {
-        pending_strip(pm, fonts, x + INPAD, y + 62.0, w - 2.0 * INPAD, "pools");
+        layout::line(
+            pm,
+            &fonts.sans,
+            "pools: waiting for host feed",
+            layout::Rect {
+                x: inner.x + gutter,
+                w: inner.w - gutter,
+                ..inner
+            },
+            layout::mid_baseline(&fonts.sans, mid, BODY.size, 'H'),
+            BODY,
+            chrome::FAINT,
+        );
         return;
     }
-    let n = sys.pools.len().max(1) as f32;
-    let bw = (w - 2.0 * INPAD) / n;
-    for (i, p) in sys.pools.iter().enumerate() {
-        let bx = x + INPAD + i as f32 * bw;
-        let inner = bw - 24.0;
+    let halves = layout::Rect {
+        x: inner.x + gutter,
+        w: inner.w - gutter,
+        ..inner
+    }
+    .columns(sys.pools.len().max(1));
+    for (p, b) in sys.pools.iter().zip(halves.iter()) {
         let dot = match p.health.as_str() {
-            "ONLINE" => GREEN,
-            "DEGRADED" => chrome::AMBER,
-            _ => RED,
+            "ONLINE" => chrome::GREEN,
+            // UNKNOWN is not failure: amber, never red. Only a stated bad
+            // state (DEGRADED excepted as caution, everything else red) alarms.
+            "DEGRADED" | "UNKNOWN" => chrome::AMBER,
+            _ => chrome::RED,
         };
-        chrome::circle(pm, bx + 10.0, y + 66.0, 9.0, dot);
-        chrome::text(pm, &fonts.sans, &p.name, bx + 30.0, y + 76.0, 34.0, TEXT);
-        chrome::text_right(
+        layout::dot(
             pm,
-            &fonts.mono,
-            &p.health,
-            bx + inner,
-            y + 76.0,
-            24.0,
-            MUTED,
+            b.x + 10.0,
+            b.y,
+            layout::Face {
+                font: &fonts.sans,
+                size: H2.size,
+                sample: 'H',
+            },
+            9.0,
+            dot,
         );
+        let name_rect = layout::Rect {
+            x: b.x + 30.0,
+            y: b.y,
+            w: b.w - 30.0,
+            h: b.h,
+        };
+        layout::line(pm, &fonts.sans, &p.name, name_rect, b.y, H2, chrome::TEXT);
+        layout::line_right(pm, &fonts.mono, &p.health, *b, b.y, SMALL, chrome::MUTED);
         let io = format!(
             "↓ {}   ↑ {}",
             human_bps(p.read_bps * 8.0),
             human_bps(p.write_bps * 8.0)
         );
-        chrome::text(pm, &fonts.mono, &io, bx, y + 112.0, 24.0, MUTED);
+        layout::line(
+            pm,
+            &fonts.mono,
+            &io,
+            *b,
+            b.y + H2.lh + layout::XS,
+            SMALL,
+            chrome::MUTED,
+        );
         let frac = p.util_pct.map(|u| u / 100.0).unwrap_or(0.0);
-        chrome::bar(pm, bx, y + 124.0, inner, 12.0, frac, GREEN);
+        chrome::bar(
+            pm,
+            b.x,
+            b.y + H2.lh + SMALL.lh + 2.0 * layout::XS,
+            b.w - layout::M,
+            12.0,
+            frac,
+            chrome::GREEN,
+        );
         let mut sub = match p.used_pct {
             Some(u) => format!("used {u:.0}%"),
             None => "used —".to_string(),
@@ -918,6 +1014,14 @@ fn pools_row(cx: &mut Cx, x: f32, y: f32, w: f32, h: f32) {
         if let Some(t) = p.temp_c {
             sub.push_str(&format!("   ·   {t:.0}°"));
         }
-        chrome::text(pm, &fonts.mono, &sub, bx, y + h - INPAD, SUB_SIZE, MUTED);
+        layout::line(
+            pm,
+            &fonts.mono,
+            &sub,
+            *b,
+            b.y + b.h - SMALL.lh,
+            SMALL,
+            chrome::MUTED,
+        );
     }
 }
