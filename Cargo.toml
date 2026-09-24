@@ -1,11 +1,12 @@
 [package]
 name = "cksk"
-version = "0.1.12"
+version = "0.1.13"
 edition = "2021"
 rust-version = "1.89"
 license = "FSL-1.1-ALv2"
 description = "Server-monitor boards for a clck kiosk display: polls status sources, renders big-type status screens, streams frames to the display server"
-homepage = "https://github.com/corbet-labs/cksk"
+homepage = "https://github.com/corbet-libs/cksk"
+repository = "https://github.com/corbet-libs/cksk"
 
 # The board model+render are a [lib] so a future web build can reuse them without pulling
 # in any display-server code at all.
