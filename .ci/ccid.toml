@@ -5,3 +5,12 @@ project = "cksk"
 [checks.rust]
 kind = "cargo"
 actions = ["fmt", "test", "clippy"]
+
+[render]
+tool_revision = "77a5ac18542750de020ebf753d22c3200530282b"
+
+[jobs.verify]
+scheduler = "crow"
+checks = ["rust"]
+workflow = "repository-jobs"
+command = ["bash", ".ci/run-job.sh"]
