@@ -7,7 +7,7 @@ kind = "cargo"
 actions = ["fmt", "test", "clippy"]
 
 [render]
-tool_revision = "77a5ac18542750de020ebf753d22c3200530282b"
+tool_revision = "78a4e05b4e1cb25aaeba3966951564d74277bcbd"
 
 [jobs.verify]
 scheduler = "crow"
