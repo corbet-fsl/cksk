@@ -1,6 +1,6 @@
 [package]
 name = "cksk"
-version = "0.1.13"
+version = "0.1.14"
 edition = "2021"
 license = "FSL-1.1-ALv2"
 description = "Server-monitor boards for a clck kiosk display: polls status sources, renders big-type status screens, streams frames to the display server"

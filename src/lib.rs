@@ -21,4 +21,4 @@ pub mod system;
 pub use chrome::{Fonts, Header};
 pub use gatus::GatusSource;
 pub use model::Endpoint;
-pub use show::{Show, BOARDS, DWELL_SECS};
+pub use show::{detail_pages, Page, Show, DWELL_SECS};

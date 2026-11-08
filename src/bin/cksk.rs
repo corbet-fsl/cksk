@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-// cksk [--version|-V] [--dump <out.png>] [--source <file|url>]
+// cksk [--version|-V] [--dump <out.png>] [--dump-pages <dir>] [--source <file|url>]
 //
 // A socket CLIENT for a clck kiosk display socket: it connects to the display server's Unix
 // socket (retrying with backoff if the server is not up yet OR its kiosk surface has not been
@@ -17,15 +17,17 @@
 // GATUS_URL / CLCK_SOCKET (fallback: NIXLOCK_SOCKET) env vars, then a neutral built-in default.
 //
 // --dump renders exactly one frame headlessly to a PNG (tiny_skia::Pixmap::save_png) through the
-// same GatusBoard::render the live path uses -- no socket connection needed, so it verifies the
-// render (fonts, layout, Gatus parsing) in CI or over SSH.
+// same Show::render_named the live path uses -- no socket connection needed, so it verifies the
+// render (fonts, layout, Gatus parsing) in CI or over SSH. --dump-pages writes every board the
+// current feed warrants (overview, each detail page, system), which proves that no row the
+// source returns is invisible.
 
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use cksk::{Show, BOARDS};
+use cksk::Show;
 use serde::Deserialize;
 
 // A neutral placeholder -- the real URL is a per-host runtime config value, never baked in here.
@@ -167,25 +169,55 @@ fn main() {
         let gatus_url = resolve_gatus_url(&file);
         let source = arg("--source").unwrap_or(gatus_url);
         let screen = arg("--screen").unwrap_or_else(|| "overview".to_string());
-        if !BOARDS.iter().any(|b| b.id == screen) {
-            let ids: Vec<&str> = BOARDS.iter().map(|b| b.id).collect();
-            eprintln!(
-                "cksk: unknown --screen {screen}; one of: {}",
-                ids.join(", ")
-            );
-            std::process::exit(2);
-        }
         // --feed <path> lets a preview render host rows from a fixture without
         // touching the live config file.
         let feed = arg("--feed").or(file.host_feed);
-        let show = Show::with_feed(source, feed);
 
         let (w, h) = (1920u32, 1080u32);
-        let pm = show
-            .render_screen(&screen, w, h)
-            .expect("Show::render_screen returns Some for a nonzero size");
+        let show = Show::with_feed(source, feed);
+        let pm = show.render_named(&screen, w, h).unwrap_or_else(|e| {
+            eprintln!("cksk: --dump --screen {screen}: {e}");
+            std::process::exit(2);
+        });
         pm.save_png(&out).expect("save png");
         eprintln!("cksk: dumped {screen} {w}x{h} -> {out}");
+        return;
+    }
+
+    // --dump-pages renders every board the current feed warrants (overview, every
+    // detail page, system) into a directory: the proof that the show contains every
+    // row the source returned, without watching the kiosk rotate.
+    if let Some(dir) = arg("--dump-pages") {
+        let file = load_file_config();
+        let gatus_url = resolve_gatus_url(&file);
+        let source = arg("--source").unwrap_or(gatus_url);
+        let feed = arg("--feed").or(file.host_feed);
+        let (w, h) = (1920u32, 1080u32);
+        let show = Show::with_feed(source, feed);
+        std::fs::create_dir_all(&dir).unwrap_or_else(|e| {
+            eprintln!("cksk: create {dir}: {e}");
+            std::process::exit(2);
+        });
+        let pages = show.pages(h);
+        let mut boards: Vec<String> = vec!["overview".to_string(), "system".to_string()];
+        boards.extend((1..=pages.len()).map(|i| format!("page-{i}")));
+        for id in &boards {
+            let pm = show
+                .render_named(id, w, h)
+                .unwrap_or_else(|e| panic!("render {id}: {e}"));
+            let path = std::path::Path::new(&dir).join(format!("{id}.png"));
+            pm.save_png(&path).expect("save png");
+            eprintln!("cksk: dumped {id} -> {}", path.display());
+        }
+        let rows: usize = pages
+            .iter()
+            .map(|p| p.groups.iter().map(|(_, i)| i.len()).sum::<usize>())
+            .sum();
+        eprintln!(
+            "cksk: {} boards, {} detail pages, {rows} rows on the detail pages",
+            boards.len(),
+            pages.len()
+        );
         return;
     }
 

@@ -16,6 +16,88 @@ const CARD_PAD: f32 = 16.0;
 const GROUP_GAP: f32 = 20.0;
 pub const ROWS_PER_COLUMN: usize = 12;
 
+/// Where one chunk (a group, or one continuation chunk of a large group) lands.
+pub struct Placement {
+    /// Index into the chunk list that was packed.
+    pub chunk: usize,
+    pub col: usize,
+    pub y: f32,
+    pub h: f32,
+}
+
+/// Split `idxs` of one group into column-sized chunks (the last one may be shorter).
+pub fn chunk_group(idxs: &[usize]) -> Vec<Vec<usize>> {
+    idxs.chunks(ROWS_PER_COLUMN).map(|c| c.to_vec()).collect()
+}
+
+/// All chunks of `groups` with their titled continuations, biggest first (the order
+/// the packer consumes them in so a large group claims room instead of packing late).
+pub fn chunks_of(groups: &[(String, Vec<usize>)]) -> Vec<(String, Vec<usize>)> {
+    let mut chunks: Vec<(String, Vec<usize>)> = Vec::new();
+    for (gname, idxs) in groups {
+        let parts = chunk_group(idxs);
+        let n = parts.len().max(1);
+        for (k, part) in parts.into_iter().enumerate() {
+            let title = if n == 1 {
+                gname.to_uppercase()
+            } else {
+                format!("{} · {}/{}", gname.to_uppercase(), k + 1, n)
+            };
+            chunks.push((title, part));
+        }
+    }
+    chunks.sort_by_key(|(_, idxs)| std::cmp::Reverse(idxs.len()));
+    chunks
+}
+
+/// Greedy shortest-column packing of `chunks` between `top` and `bottom`.
+/// Returns the placements plus every chunk that fit no column (dropped, never clipped).
+pub fn pack(
+    chunks: &[(String, Vec<usize>)],
+    cols: usize,
+    top: f32,
+    bottom: f32,
+) -> (Vec<Placement>, Vec<usize>) {
+    let cols = cols.max(1);
+    let mut col_y = vec![top; cols];
+    let mut placements = Vec::new();
+    let mut dropped = Vec::new();
+    for (ci, (_, idxs)) in chunks.iter().enumerate() {
+        let h = card_height(idxs.len());
+        let mut best: Option<usize> = None;
+        for (c, y) in col_y.iter().enumerate() {
+            if y + h > bottom {
+                continue;
+            }
+            if best.is_none_or(|b| *y < col_y[b]) {
+                best = Some(c);
+            }
+        }
+        match best {
+            Some(c) => {
+                placements.push(Placement {
+                    chunk: ci,
+                    col: c,
+                    y: col_y[c],
+                    h,
+                });
+                col_y[c] += h + GROUP_GAP;
+            }
+            None => dropped.push(ci),
+        }
+    }
+    (placements, dropped)
+}
+
+fn card_height(rows: usize) -> f32 {
+    GROUP_HEAD_H + rows as f32 * ROW_H + CARD_PAD
+}
+
+/// The vertical band every group board draws into, for a given pixmap height.
+pub fn band(height: f32) -> (f32, f32) {
+    (HEADER_H + XS, height - MARGIN)
+}
+
 /// Filter `eps` down to the `want` groups, in `want` order. Missing or empty groups
 /// vanish silently, so a board never renders an empty card.
 pub fn select_groups(eps: &[Endpoint], want: &[&str]) -> Vec<(String, Vec<usize>)> {
@@ -37,6 +119,7 @@ pub fn select_groups(eps: &[Endpoint], want: &[&str]) -> Vec<(String, Vec<usize>
 /// Render pre-selected `groups` into `cols` columns, greediest-shortest-column first.
 /// A group larger than one column splits into titled continuation chunks; a chunk that
 /// fits no column is skipped gracefully -- a board shows what fits, never a clipped card.
+/// Returns the indices of every endpoint actually drawn, so callers can prove coverage.
 pub fn render_groups(
     pm: &mut Pixmap,
     eps: &[Endpoint],
@@ -44,62 +127,42 @@ pub fn render_groups(
     hdr: &Header,
     groups: &[(String, Vec<usize>)],
     cols: usize,
-) {
+) -> Vec<usize> {
     let w = pm.width() as f32;
     let h = pm.height() as f32;
-    let cols = cols.max(1);
+    if cols == 0 {
+        return Vec::new();
+    }
 
     chrome::fill_rect(pm, 0.0, 0.0, w, h, chrome::BG);
     chrome::render_header(pm, fonts, hdr);
 
-    let band = layout::Rect {
+    let (top, bottom) = band(h);
+    let band_rect = layout::Rect {
         x: MARGIN,
-        y: HEADER_H + XS,
+        y: top,
         w: w - 2.0 * MARGIN,
-        h: h - HEADER_H - XS - MARGIN,
+        h: bottom - top,
     };
-    let bottom = band.y + band.h;
-    let columns = band.columns(cols);
+    let columns = band_rect.columns(cols);
     let col_w = columns[0].w;
 
-    // Biggest chunks first so a large group claims room instead of packing late.
-    // Groups split into column-sized chunks with titled continuations.
-    let mut chunks: Vec<(String, Vec<usize>)> = Vec::new();
-    for (gname, idxs) in groups {
-        let parts: Vec<&[usize]> = idxs.chunks(ROWS_PER_COLUMN).collect();
-        let n = parts.len().max(1);
-        for (k, part) in parts.into_iter().enumerate() {
-            let title = if n == 1 {
-                gname.to_uppercase()
-            } else {
-                format!("{} · {}/{}", gname.to_uppercase(), k + 1, n)
-            };
-            chunks.push((title, part.to_vec()));
-        }
+    let chunks = chunks_of(groups);
+    let (placements, dropped) = pack(&chunks, cols, top, bottom);
+    if !dropped.is_empty() {
+        eprintln!(
+            "cksk: {} chunk(s) do not fit this board at {w}x{h}; they are dropped. \
+             The page planner must leave more room.",
+            dropped.len()
+        );
     }
-    let mut order: Vec<usize> = (0..chunks.len()).collect();
-    order.sort_by_key(|&ci| std::cmp::Reverse(chunks[ci].1.len()));
 
-    // Column cursors: greedy shortest column that actually fits the chunk.
-    let mut col_y: Vec<f32> = columns.iter().map(|c| c.y).collect();
-    for ci in order {
-        let (title, idxs) = &chunks[ci];
-        let card_h = GROUP_HEAD_H + idxs.len() as f32 * ROW_H + CARD_PAD;
-        let mut best: Option<usize> = None;
-        for (c, y) in col_y.iter().enumerate() {
-            if y + card_h > bottom {
-                continue;
-            }
-            if best.is_none_or(|b| *y < col_y[b]) {
-                best = Some(c);
-            }
-        }
-        let c = match best {
-            Some(c) => c,
-            None => continue, // fits no column; skip it, never clip
-        };
-        let x = columns[c].x;
-        let y = col_y[c];
+    let mut drawn = Vec::new();
+    for p in placements {
+        let (title, idxs) = &chunks[p.chunk];
+        let x = columns[p.col].x;
+        let y = p.y;
+        let card_h = p.h;
 
         chrome::rounded_rect(pm, x, y, col_w, card_h, 16.0, chrome::CARD);
 
@@ -214,8 +277,44 @@ pub fn render_groups(
                     chrome::fill_rect(pm, sx, strip.y, (seg - 1.0).max(1.0), strip.h, c);
                 }
             }
+            drawn.push(ei);
         }
+    }
+    drawn
+}
 
-        col_y[c] = y + card_h + GROUP_GAP;
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn groups(n: &[usize]) -> Vec<(String, Vec<usize>)> {
+        n.iter()
+            .enumerate()
+            .map(|(g, &rows)| (format!("g{g}"), (0..rows).collect()))
+            .collect()
+    }
+
+    #[test]
+    fn pack_drops_nothing_when_the_page_was_planned_for_the_band() {
+        let (top, bottom) = band(1080.0);
+        // 30 + 24 + 25 rows: three pages worth of whole groups across three columns.
+        for page in [
+            groups(&[30]),
+            groups(&[9, 13, 1, 2]),
+            groups(&[3, 2, 2, 10, 7]),
+        ] {
+            let chunks = chunks_of(&page);
+            let (placements, dropped) = pack(&chunks, 3, top, bottom);
+            assert!(dropped.is_empty(), "dropped {dropped:?} for {page:?}");
+            assert_eq!(placements.len(), chunks.len());
+        }
+    }
+
+    #[test]
+    fn pack_reports_a_chunk_that_fits_no_column() {
+        let chunks = chunks_of(&groups(&[12, 12, 12, 12]));
+        let (placements, dropped) = pack(&chunks, 3, 0.0, 1000.0);
+        assert_eq!(placements.len(), 3);
+        assert_eq!(dropped.len(), 1);
     }
 }

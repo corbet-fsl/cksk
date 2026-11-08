@@ -6,23 +6,32 @@
 use tiny_skia::Pixmap;
 
 use crate::chrome::{self, Fonts, Header, HEADER_H, PAD};
-use crate::layout::{self, D1, H2, MARGIN, T3};
+use crate::layout::{self, D1, H2, MARGIN, T3, XS};
 use crate::model::Endpoint;
 
 /// Canonical group order: most customer-visible first, housekeeping last.
+/// This is the live estate's vocabulary (the Vultr status source). A group that
+/// is not listed still appears: `pages::ordered_groups` appends it after these,
+/// so a new group can never vanish from the boards.
 pub const GROUP_ORDER: &[&str] = &[
-    "public",
-    "internal",
-    "platform",
     "mail",
+    "certificates",
+    "ci",
+    "nodes",
+    "caches",
+    "github",
+    "seaweedfs",
     "backups",
-    "l4-databases",
     "clouds",
     "watchdog",
 ];
 
 const ROW_H: f32 = 92.0;
 
+/// Render the overview and return how many group rows were drawn.
+/// Rows compact when the estate has many groups; past the readable minimum the
+/// tail is summarised as "+N more" instead of drawn over itself (the detail pages
+/// still carry every row).
 pub fn render_overview(
     pm: &mut Pixmap,
     eps: &[Endpoint],
@@ -30,7 +39,7 @@ pub fn render_overview(
     hdr: &Header,
     groups: &[(String, Vec<usize>)],
     data_age_secs: Option<u64>,
-) {
+) -> usize {
     let w = pm.width() as f32;
     let h = pm.height() as f32;
 
@@ -60,15 +69,7 @@ pub fn render_overview(
                 sub_color = chrome::AMBER;
             }
         }
-        layout::line(
-            pm,
-            &fonts.sans,
-            &sub,
-            grid,
-            y + D1.lh + layout::XS,
-            T3,
-            sub_color,
-        );
+        layout::line(pm, &fonts.sans, &sub, grid, y + D1.lh + XS, T3, sub_color);
     } else {
         let v = format!(
             "{} OUTAGE{}",
@@ -87,18 +88,30 @@ pub fn render_overview(
             &fonts.sans,
             &joined,
             grid,
-            y + D1.lh + layout::XS,
+            y + D1.lh + XS,
             T3,
             chrome::RED,
         );
     }
-    y += D1.lh + T3.lh + 2.0 * layout::XS + layout::M;
+    y += D1.lh + T3.lh + 2.0 * XS + layout::M;
 
-    // ---- one row per group ----
-    for (gname, idxs) in groups {
-        if y + ROW_H > h - PAD {
-            break;
-        }
+    // ---- one row per group (compacting to keep every row inside the panel) ----
+    let available = h - PAD - y;
+    let n = groups.len();
+    if n == 0 {
+        return 0;
+    }
+    let min_h = H2.lh + XS;
+    let mut row_h = (available / n as f32).min(ROW_H);
+    let shown = if row_h < min_h {
+        // Not enough height for every group at a readable size: draw as many as
+        // fit and name the remainder. Never overlap type on type.
+        row_h = min_h;
+        (available / row_h).floor().max(0.0) as usize
+    } else {
+        n
+    };
+    for (gname, idxs) in groups.iter().take(shown) {
         let up = idxs
             .iter()
             .filter(|&&ei| eps[ei].up() == Some(true))
@@ -108,9 +121,9 @@ pub fn render_overview(
             .filter(|&&ei| eps[ei].up() == Some(false))
             .count();
         let dot = if down > 0 { chrome::RED } else { chrome::GREEN };
-        let row = grid.at_y(y, ROW_H);
+        let row = grid.at_y(y, row_h);
         // Name block: dot + title share one line box, dot on the measured cap-center.
-        let name_top = y + (ROW_H - H2.lh) / 2.0;
+        let name_top = y + (row_h - H2.lh) / 2.0;
         layout::dot(
             pm,
             PAD + 12.0,
@@ -141,18 +154,30 @@ pub fn render_overview(
         let stat = if down > 0 {
             format!("{down} DOWN")
         } else {
-            format!("{up}/{0} OK", idxs.len())
+            format!("{up}/{} OK", idxs.len())
         };
         let stat_c = if down > 0 { chrome::RED } else { chrome::MUTED };
         layout::line_right(pm, &fonts.mono, &stat, row, name_top, T3, stat_c);
         chrome::fill_rect(
             pm,
             PAD,
-            y + ROW_H - 2.0,
+            y + row_h - 2.0,
             w - 2.0 * PAD,
             2.0,
             chrome::CARD_LINE,
         );
-        y += ROW_H;
+        y += row_h;
     }
+    if shown < n {
+        layout::line(
+            pm,
+            &fonts.sans,
+            &format!("+{} more groups on the detail boards", n - shown),
+            grid,
+            y + XS,
+            T3,
+            chrome::MUTED,
+        );
+    }
+    shown
 }

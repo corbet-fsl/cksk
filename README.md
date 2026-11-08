@@ -6,15 +6,23 @@ status screens in rotation, and streams frames to the display server. No nix req
 ```console
 $ cargo build --release
 $ ./target/release/cksk --dump board.png --screen overview --source https://status.example.com/api/v1/endpoints/statuses
+$ ./target/release/cksk --dump-pages /tmp/boards --source https://status.example.com/api/v1/endpoints/statuses
 $ GATUS_URL=... CLCK_SOCKET=$XDG_RUNTIME_DIR/clck.sock ./target/release/cksk
 ```
 
-Boards (`--screen`, 30s each, hard cut; mailbox 60s): `overview` (verdict + groups),
-`public`, `services`, `mail` (service details at room-readable type), `system`
-(compute/memory/temps columns plus network + pool rows).
-Header (`corbet status` + clock) is identical on every board.
-Live rotation is strictly adaptive: overview/system core loop, troubled boards
-pin until recovery, healthy detail boards appear as proof-of-life every fifth
+Boards (30s each, hard cut): `overview` (verdict + one row per group), the detail
+pages (service details at room-readable type), `system` (compute/memory/temps
+columns plus network + pool rows). Header (`corbet status` + clock) is identical
+on every board.
+
+Detail pages are derived from the feed, not from a fixed group list: groups are
+packed three columns at a time in canonical order (mail, certificates, ci, nodes,
+caches, github, seaweedfs, backups, clouds, watchdog) and any group the source
+grows after that list is appended, so every row the source returns appears on
+some page. `--dump-pages DIR` writes `overview`, every `page-N`, and `system` as
+PNGs -- the proof of what the show contains without watching it rotate.
+Live rotation is strictly adaptive: overview/system core loop, troubled pages
+pin until recovery, healthy detail pages appear as proof-of-life every fifth
 cycle. Gatus data older than 90s is labeled stale instead of shown green.
 
 Config (`$XDG_CONFIG_HOME/cksk/config.json`): `gatus_url`, `socket_path`,
