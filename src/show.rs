@@ -98,13 +98,14 @@ pub fn detail_pages(eps: &[Endpoint], height: f32) -> Vec<Page> {
     let mut pages: Vec<Page> = Vec::new();
     let mut cur: Vec<(String, Vec<usize>)> = Vec::new();
     for (gname, idxs) in ordered_groups(eps) {
-        for part in groups::chunk_group(&idxs) {
+        let rows = groups::rows_per_column(height);
+        for part in groups::chunk_group(&idxs, rows) {
             let mut trial = cur.clone();
             match trial.last_mut() {
                 Some((g, acc)) if *g == gname => acc.extend_from_slice(&part),
                 _ => trial.push((gname.clone(), part.clone())),
             }
-            let fits = groups::pack(&groups::chunks_of(&trial), PAGE_COLS, top, bottom)
+            let fits = groups::pack(&groups::chunks_of(&trial, rows), PAGE_COLS, top, bottom)
                 .1
                 .is_empty();
             if cur.is_empty() || fits {
@@ -383,7 +384,7 @@ mod tests {
         // And each page is renderable without dropping a chunk.
         let (top, bottom) = groups::band(1080.0);
         for page in &pages {
-            let chunks = groups::chunks_of(&page.groups);
+            let chunks = groups::chunks_of(&page.groups, groups::rows_per_column(1080.0));
             let (_, dropped) = groups::pack(&chunks, PAGE_COLS, top, bottom);
             assert!(dropped.is_empty(), "page {} drops a chunk", page.label);
         }
@@ -399,6 +400,23 @@ mod tests {
             .flat_map(|p| p.groups.iter())
             .any(|(g, _)| g == "brandnew-group");
         assert!(covered, "unknown group vanished from the show");
+    }
+
+    #[test]
+    fn a_shorter_kiosk_gets_more_pages_not_dropped_rows() {
+        let eps = live_estate();
+        let pages = detail_pages(&eps, 720.0);
+        let covered: usize = pages
+            .iter()
+            .map(|p| p.groups.iter().map(|(_, i)| i.len()).sum::<usize>())
+            .sum();
+        assert_eq!(covered, eps.len(), "720p lost rows instead of adding pages");
+        let (top, bottom) = groups::band(720.0);
+        for page in &pages {
+            let chunks = groups::chunks_of(&page.groups, groups::rows_per_column(720.0));
+            let (_, dropped) = groups::pack(&chunks, PAGE_COLS, top, bottom);
+            assert!(dropped.is_empty(), "720p page {} drops a chunk", page.label);
+        }
     }
 
     #[test]

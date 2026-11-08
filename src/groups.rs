@@ -25,17 +25,26 @@ pub struct Placement {
     pub h: f32,
 }
 
+/// Rows a column holds at this pixmap height. Twelve at 1080p; a shorter kiosk
+/// (or a preview at another size) gets fewer, so no page silently drops a card
+/// that cannot fit the band.
+pub fn rows_per_column(height: f32) -> usize {
+    let (top, bottom) = band(height);
+    let usable = bottom - top - GROUP_HEAD_H - CARD_PAD + GROUP_GAP;
+    ((usable / ROW_H).floor() as usize).clamp(1, ROWS_PER_COLUMN)
+}
+
 /// Split `idxs` of one group into column-sized chunks (the last one may be shorter).
-pub fn chunk_group(idxs: &[usize]) -> Vec<Vec<usize>> {
-    idxs.chunks(ROWS_PER_COLUMN).map(|c| c.to_vec()).collect()
+pub fn chunk_group(idxs: &[usize], rows: usize) -> Vec<Vec<usize>> {
+    idxs.chunks(rows.max(1)).map(|c| c.to_vec()).collect()
 }
 
 /// All chunks of `groups` with their titled continuations, biggest first (the order
 /// the packer consumes them in so a large group claims room instead of packing late).
-pub fn chunks_of(groups: &[(String, Vec<usize>)]) -> Vec<(String, Vec<usize>)> {
+pub fn chunks_of(groups: &[(String, Vec<usize>)], rows: usize) -> Vec<(String, Vec<usize>)> {
     let mut chunks: Vec<(String, Vec<usize>)> = Vec::new();
     for (gname, idxs) in groups {
-        let parts = chunk_group(idxs);
+        let parts = chunk_group(idxs, rows);
         let n = parts.len().max(1);
         for (k, part) in parts.into_iter().enumerate() {
             let title = if n == 1 {
@@ -147,7 +156,7 @@ pub fn render_groups(
     let columns = band_rect.columns(cols);
     let col_w = columns[0].w;
 
-    let chunks = chunks_of(groups);
+    let chunks = chunks_of(groups, rows_per_column(h));
     let (placements, dropped) = pack(&chunks, cols, top, bottom);
     if !dropped.is_empty() {
         eprintln!(
@@ -303,7 +312,7 @@ mod tests {
             groups(&[9, 13, 1, 2]),
             groups(&[3, 2, 2, 10, 7]),
         ] {
-            let chunks = chunks_of(&page);
+            let chunks = chunks_of(&page, rows_per_column(1080.0));
             let (placements, dropped) = pack(&chunks, 3, top, bottom);
             assert!(dropped.is_empty(), "dropped {dropped:?} for {page:?}");
             assert_eq!(placements.len(), chunks.len());
@@ -312,7 +321,7 @@ mod tests {
 
     #[test]
     fn pack_reports_a_chunk_that_fits_no_column() {
-        let chunks = chunks_of(&groups(&[12, 12, 12, 12]));
+        let chunks = chunks_of(&groups(&[12, 12, 12, 12]), 12);
         let (placements, dropped) = pack(&chunks, 3, 0.0, 1000.0);
         assert_eq!(placements.len(), 3);
         assert_eq!(dropped.len(), 1);
