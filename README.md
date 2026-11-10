@@ -4,7 +4,7 @@ Server-monitor boards for a clck kiosk display: polls status sources, renders bi
 status screens in rotation, and streams frames to the display server. No nix required.
 
 ```console
-$ cargo build --release --config .cargo/release-profile.toml
+$ cargo build --release
 $ ./target/release/cksk --dump board.png --screen overview --source https://status.example.com/api/v1/endpoints/statuses
 $ ./target/release/cksk --dump-pages /tmp/boards --source https://status.example.com/api/v1/endpoints/statuses
 $ GATUS_URL=... CLCK_SOCKET=$XDG_RUNTIME_DIR/clck.sock ./target/release/cksk
