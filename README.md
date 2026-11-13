@@ -1,5 +1,9 @@
 # cksk
 
+<!-- ccid:security:begin (rendered by ccid render; do not edit by hand) -->
+**Security and dependencies:** kept up to date automatically (Renovate, with OSV vulnerability alerts); updates are merged when their tests pass. See the [security policy](SECURITY.md).
+<!-- ccid:security:end -->
+
 Server-monitor boards for a clck kiosk display: polls status sources, renders big-type
 status screens in rotation, and streams frames to the display server. No nix required.
 
