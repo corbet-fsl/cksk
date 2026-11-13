@@ -6,8 +6,18 @@ project = "cksk"
 kind = "cargo"
 actions = ["fmt", "test", "clippy"]
 
+[checks.pack]
+kind = "pack"
+crates = "."
+
+[release]
+kind = "library"
+version = "Cargo.toml"
+registries = ["crates"]
+build = ["pack"]
+
 [render]
-render_schema = 2
+render_schema = 3
 
 [jobs.verify]
 scheduler = "forgejo"
