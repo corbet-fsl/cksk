@@ -1,7 +1,7 @@
 # cksk
 
 <!-- ccid:security:begin (rendered by ccid render; do not edit by hand) -->
-**Security and dependencies:** kept up to date automatically (Renovate, with OSV vulnerability alerts); updates are merged when their tests pass. See the [security policy](SECURITY.md).
+**Security and dependencies:** watched by Renovate (with OSV vulnerability alerts); an update is merged only when its tests pass. See the [security policy](SECURITY.md).
 <!-- ccid:security:end -->
 
 Server-monitor boards for a clck kiosk display: polls status sources, renders big-type
